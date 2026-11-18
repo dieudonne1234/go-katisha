@@ -1,0 +1,414 @@
+import { useI18n } from "@/lib/i18n";
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { ArrowRight, Bus, Clock, Filter, MapPin, SearchX, Users } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+
+import { AppShell, PageHeader } from "@/components/AppShell";
+import { PassengerError, PassengerLoading } from "@/components/PassengerLoadState";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { durationLabel, formatRwf, formatTime, todayISO } from "@/lib/format";
+import { cacheStations, getCachedStations, pushRecentSearch } from "@/lib/localCache";
+import { agenciesQuery, searchTripsQuery, stationsQuery } from "@/lib/queries";
+
+type SearchQuery = { from?: number; to?: number; date: string; pax: number };
+
+export const Route = createFileRoute("/search")({
+  validateSearch: (search: Record<string, unknown>): SearchQuery => {
+    const from = Number(search["from"]);
+    const to = Number(search["to"]);
+    const date = typeof search["date"] === "string" ? search["date"] : todayISO();
+    const pax = Number(search["pax"]) > 0 ? Number(search["pax"]) : 1;
+    const base: SearchQuery = { date, pax };
+    if (Number.isFinite(from) && from > 0) base.from = from;
+    if (Number.isFinite(to) && to > 0) base.to = to;
+    return base;
+  },
+  head: () => ({
+    meta: [
+      { title: "Search buses — KATISHA BUS" },
+      {
+        name: "description",
+        content:
+          "Compare bus departures across Rwanda by agency, price and departure time, then reserve your seat instantly.",
+      },
+      { property: "og:title", content: "Search buses — KATISHA BUS" },
+      {
+        property: "og:description",
+        content: "Find available buses between Rwandan stations and book a seat in seconds.",
+      },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary_large_image" },
+    ],
+  }),
+  component: SearchPage,
+});
+
+function SearchPage() {
+  const { tr } = useI18n();
+  const params = Route.useSearch();
+  const navigate = useNavigate();
+  const stationsResult = useQuery(stationsQuery);
+  const stations = stationsResult.data;
+  const { data: agencies } = useQuery(agenciesQuery);
+
+  const [from, setFrom] = useState(params.from ? String(params.from) : "");
+  const [to, setTo] = useState(params.to ? String(params.to) : "");
+  const [date, setDate] = useState(params.date);
+  const [pax, setPax] = useState(String(params.pax));
+
+  const [agencyFilter, setAgencyFilter] = useState("all");
+  const [timeFilter, setTimeFilter] = useState("all");
+  const [sortBy, setSortBy] = useState("departure");
+
+  useEffect(() => {
+    setFrom(params.from ? String(params.from) : "");
+    setTo(params.to ? String(params.to) : "");
+    setDate(params.date);
+    setPax(String(params.pax));
+  }, [params]);
+
+  useEffect(() => {
+    if (stations?.length) cacheStations(stations);
+  }, [stations]);
+
+  const stationList = useMemo(
+    () => (stations?.length ? stations : getCachedStations()),
+    [stations],
+  );
+
+  const ready = Boolean(params.from && params.to);
+  const query = useQuery({
+    ...searchTripsQuery({ from: params.from ?? 0, to: params.to ?? 0, date: params.date }),
+    enabled: ready,
+  });
+
+  const results = useMemo(() => {
+    let list = (query.data ?? []).filter((t) => t.available_seats >= params.pax);
+    if (agencyFilter !== "all") list = list.filter((t) => String(t.agency.id) === agencyFilter);
+    if (timeFilter !== "all") {
+      list = list.filter((t) => {
+        const hour = Number(t.departure_time.slice(0, 2));
+        if (timeFilter === "morning") return hour < 12;
+        if (timeFilter === "afternoon") return hour >= 12 && hour < 17;
+        return hour >= 17;
+      });
+    }
+    const sorted = [...list];
+    if (sortBy === "price") sorted.sort((a, b) => a.price_rwf - b.price_rwf);
+    else if (sortBy === "seats") sorted.sort((a, b) => b.available_seats - a.available_seats);
+    else if (sortBy === "arrival")
+      sorted.sort((a, b) => a.arrival_time.localeCompare(b.arrival_time));
+    else sorted.sort((a, b) => a.departure_time.localeCompare(b.departure_time));
+    return sorted;
+  }, [query.data, agencyFilter, timeFilter, sortBy, params.pax]);
+
+  function submit() {
+    if (!from || !to || from === to) return;
+    const fromStation = stationList.find((s) => String(s.id) === from);
+    const toStation = stationList.find((s) => String(s.id) === to);
+    pushRecentSearch({
+      from: Number(from),
+      to: Number(to),
+      fromName: fromStation?.name ?? "",
+      toName: toStation?.name ?? "",
+      date,
+      pax: Number(pax),
+    });
+    void navigate({
+      to: "/search",
+      search: { from: Number(from), to: Number(to), date, pax: Number(pax) },
+    });
+  }
+
+  return (
+    <AppShell>
+      <div className="mx-auto w-full max-w-6xl px-4 py-8">
+        <PageHeader
+          title={tr("Search buses")}
+          subtitle={tr("Choose your stations and travel date to see live departures.")}
+        />
+
+        <Card className="mb-6 shadow-card">
+          <CardContent className="grid gap-4 p-5 md:grid-cols-[1fr_1fr_1fr_auto_auto] md:items-end">
+            <div className="space-y-1.5">
+              <Label className="text-[11px] tracking-widest uppercase">{tr("From")}</Label>
+              <Select value={from} onValueChange={setFrom}>
+                <SelectTrigger className="h-11 w-full">
+                  <SelectValue placeholder={tr("Departure")} />
+                </SelectTrigger>
+                <SelectContent>
+                  {stationList.map((s) => (
+                    <SelectItem key={s.id} value={String(s.id)}>
+                      {s.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-[11px] tracking-widest uppercase">{tr("To")}</Label>
+              <Select value={to} onValueChange={setTo}>
+                <SelectTrigger className="h-11 w-full">
+                  <SelectValue placeholder={tr("Destination")} />
+                </SelectTrigger>
+                <SelectContent>
+                  {stationList.map((s) => (
+                    <SelectItem key={s.id} value={String(s.id)}>
+                      {s.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-[11px] tracking-widest uppercase">{tr("Date")}</Label>
+              <Input
+                type="date"
+                className="h-11"
+                min={todayISO()}
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-[11px] tracking-widest uppercase">{tr("Pax")}</Label>
+              <Select value={pax} onValueChange={setPax}>
+                <SelectTrigger className="h-11 w-full md:w-32">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {[1, 2, 3, 4, 5].map((n) => (
+                    <SelectItem key={n} value={String(n)}>
+                      {n}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button className="h-11" onClick={submit} disabled={!from || !to || from === to}>
+              {tr("Search")}
+            </Button>
+          </CardContent>
+        </Card>
+
+        {stationsResult.isLoading ? (
+          <PassengerLoading label={tr("Loading stations…")} />
+        ) : stationsResult.isError ? (
+          <PassengerError
+            message={tr("Stations could not be loaded. Check your connection and try again.")}
+            retry={() => void stationsResult.refetch()}
+            retrying={stationsResult.isFetching}
+          />
+        ) : stationList.length === 0 ? (
+          <p role="status" className="mb-5 text-sm text-muted-foreground">
+            {tr("No stations are available yet.")}
+          </p>
+        ) : null}
+
+        {ready ? (
+          <>
+            <div className="mb-5 flex flex-wrap items-center gap-3">
+              <span className="flex items-center gap-1.5 text-sm font-semibold text-muted-foreground">
+                <Filter className="size-4" /> {tr("Filters")}
+              </span>
+              <Select value={agencyFilter} onValueChange={setAgencyFilter}>
+                <SelectTrigger className="h-9 w-44">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">{tr("All agencies")}</SelectItem>
+                  {(agencies ?? []).map((a) => (
+                    <SelectItem key={a.id} value={String(a.id)}>
+                      {a.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={timeFilter} onValueChange={setTimeFilter}>
+                <SelectTrigger className="h-9 w-40">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">{tr("Any time")}</SelectItem>
+                  <SelectItem value="morning">{tr("Morning")}</SelectItem>
+                  <SelectItem value="afternoon">{tr("Afternoon")}</SelectItem>
+                  <SelectItem value="evening">{tr("Evening")}</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select value={sortBy} onValueChange={setSortBy}>
+                <SelectTrigger className="h-9 w-48">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="departure">{tr("Sort: departure time")}</SelectItem>
+                  <SelectItem value="arrival">{tr("Sort: arrival time")}</SelectItem>
+                  <SelectItem value="price">{tr("Sort: lowest price")}</SelectItem>
+                  <SelectItem value="seats">{tr("Sort: most seats free")}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {query.isLoading ? (
+              <div className="space-y-4">
+                <PassengerLoading label={tr("Searching available departures…")} />
+                {[0, 1, 2].map((i) => (
+                  <Skeleton key={i} className="h-36 w-full rounded-xl" />
+                ))}
+              </div>
+            ) : query.isError ? (
+              <PassengerError
+                message={tr("We couldn't load departures. Check your connection and try again.")}
+                retry={() => void query.refetch()}
+                retrying={query.isFetching}
+              />
+            ) : results.length === 0 ? (
+              <Card>
+                <CardContent className="flex flex-col items-center gap-3 p-12 text-center">
+                  <SearchX className="size-10 text-muted-foreground" />
+                  <p className="font-display text-lg font-bold">{tr("No buses found")}</p>
+                  <p className="max-w-sm text-sm text-muted-foreground">
+                    {tr(
+                      "There are no departures matching these filters. Try another date, another corridor, or clear the filters.",
+                    )}
+                  </p>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setAgencyFilter("all");
+                      setTimeFilter("all");
+                    }}
+                    disabled={agencyFilter === "all" && timeFilter === "all"}
+                  >
+                    {tr("Clear filters")}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    disabled={query.isFetching}
+                    onClick={() => void query.refetch()}
+                  >
+                    {query.isFetching ? tr("Checking…") : tr("Check departures again")}
+                  </Button>
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="space-y-4">
+                <p className="text-sm text-muted-foreground">
+                  {results.length} bus{results.length === 1 ? "" : "es"} {"available"}
+                </p>
+                {results.map((trip) => (
+                  <Card
+                    key={trip.id}
+                    className="overflow-hidden transition-shadow hover:shadow-lift"
+                  >
+                    <CardContent className="grid gap-5 p-5 md:grid-cols-[1fr_auto] md:items-center">
+                      <div className="space-y-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge className="bg-primary/10 text-primary hover:bg-primary/10">
+                            {trip.agency.name}
+                          </Badge>
+                          <Badge variant="secondary">{tr(trip.bus.bus_type)}</Badge>
+                          <span className="text-xs font-medium text-muted-foreground">
+                            {tr("Bus")}
+                            {trip.bus.bus_number} · {trip.bus.plate_number}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-4">
+                          <div>
+                            <p className="font-display text-2xl font-extrabold">
+                              {formatTime(trip.departure_time)}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {trip.route.origin.name}
+                            </p>
+                          </div>
+                          <div className="flex flex-col items-center px-2">
+                            <span className="text-[11px] font-semibold text-muted-foreground">
+                              {durationLabel(trip.route.duration_minutes)}
+                            </span>
+                            <div className="my-1 h-px w-16 bg-border" />
+                            <span className="text-[11px] text-muted-foreground">
+                              {trip.route.distance_km} km
+                            </span>
+                          </div>
+                          <div>
+                            <p className="font-display text-2xl font-extrabold">
+                              {formatTime(trip.arrival_time)}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {trip.route.destination.name}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
+                          <span className="flex items-center gap-1">
+                            <MapPin className="size-3.5" />
+                            {trip.route.origin.city} → {trip.route.destination.city}
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <Users className="size-3.5" />
+                            {tr("seatAvailability", {
+                              count: trip.available_seats,
+                              capacity: trip.bus.seat_capacity,
+                            })}
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <Clock className="size-3.5" />
+                            {tr("Boarding 20 min before departure")}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-row items-center justify-between gap-4 border-t border-border pt-4 md:flex-col md:items-end md:border-t-0 md:border-l md:pt-0 md:pl-6">
+                        <div className="text-right">
+                          <p className="font-display text-2xl font-extrabold text-primary">
+                            {formatRwf(trip.price_rwf)}
+                          </p>
+                          <p className="text-xs text-muted-foreground">{tr("per passenger")}</p>
+                        </div>
+                        <Button asChild size="lg">
+                          <Link
+                            to="/trips/$tripId"
+                            params={{ tripId: String(trip.id) }}
+                            search={{ pax: params.pax }}
+                          >
+                            {tr("Select seats")}
+                            <ArrowRight className="size-4" />
+                          </Link>
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <Card>
+            <CardContent className="flex flex-col items-center gap-3 p-12 text-center">
+              <Bus className="size-10 text-muted-foreground" />
+              <p className="font-display text-lg font-bold">{tr("Where are you travelling?")}</p>
+              <p className="max-w-sm text-sm text-muted-foreground">
+                {tr("Pick a departure and destination station above to see all available buses.")}
+              </p>
+            </CardContent>
+          </Card>
+        )}
+      </div>
+    </AppShell>
+  );
+}
